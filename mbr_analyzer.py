@@ -42,11 +42,10 @@ def parse_partition_entry(entry: bytes) -> Dict[str, Any]:
 
 
 def analyze_mbr(mbr: bytes) -> Dict[str, Any]:
-    """Analyze the MBR and return a structured report."""
     report: Dict[str, Any] = {}
-    issues: List[str] = []
+    issues: List[str] = []      # BROKEN-class findings
+    warnings: List[str] = []    # suspicious / misconfig
 
-    # Check signature
     sig = mbr[510:512]
     valid_signature = (sig == b"\x55\xaa")
     if not valid_signature:
@@ -55,7 +54,6 @@ def analyze_mbr(mbr: bytes) -> Dict[str, Any]:
     report["signature_valid"] = valid_signature
     report["signature_hex"] = f"0x{sig[0]:02X}{sig[1]:02X}"
 
-    # Parse partition entries
     partitions: List[Dict[str, Any]] = []
     for i in range(4):
         offset = 446 + i * 16
@@ -66,25 +64,24 @@ def analyze_mbr(mbr: bytes) -> Dict[str, Any]:
 
     report["partitions"] = partitions
 
-    # Basic sanity checks
     bootable_count = sum(1 for p in partitions if p["bootable"])
     if bootable_count > 1:
-        issues.append(f"{bootable_count} active (bootable) partitions detected (expected at most 1).")
+        warnings.append(f"{bootable_count} active (bootable) partitions detected (expected at most 1).")
 
-    # Check entries with type but zero size
     for p in partitions:
         if p["partition_type"] != 0x00 and p["num_sectors"] == 0:
-            issues.append(
-                f"Partition {p['index']} has non-zero type 0x{p['partition_type']:02X} "
-                f"but zero sectors."
+            warnings.append(
+                f"Partition {p['index']} has non-zero type 0x{p['partition_type']:02X} but zero sectors."
             )
 
-    # Check for overlapping partitions (LBA-based, ignoring empty ones)
-    used_parts = [
-        p for p in partitions
-        if p["partition_type"] != 0x00 and p["num_sectors"] > 0
-    ]
+        # alignment / suspicious LBA start (common modern alignment is 2048)
+        if p["partition_type"] != 0x00 and p["num_sectors"] > 0:
+            if p["lba_start"] < 63:
+                warnings.append(
+                    f"Partition {p['index']} starts at LBA {p['lba_start']} (very low; may be legacy/weird alignment)."
+                )
 
+    used_parts = [p for p in partitions if p["partition_type"] != 0x00 and p["num_sectors"] > 0]
     used_parts_sorted = sorted(used_parts, key=lambda p: p["lba_start"])
     for i in range(1, len(used_parts_sorted)):
         prev = used_parts_sorted[i - 1]
@@ -96,17 +93,18 @@ def analyze_mbr(mbr: bytes) -> Dict[str, Any]:
                 f"partition {prev['index']} (end LBA {prev_end})."
             )
 
-    # Simple classification of "broken"
-    # (This is heuristic, MBR spec doesn't define 'broken' strictly.)
-    broken = False
-    if not valid_signature:
-        broken = True
-    if any("overlaps" in issue for issue in issues):
-        broken = True
+    # status decision
+    if issues:
+        status = "BROKEN"
+    elif warnings:
+        status = "WARN"
+    else:
+        status = "OK"
 
     report["issues"] = issues
-    report["looks_broken"] = broken
-
+    report["warnings"] = warnings
+    report["status"] = status
+    report["looks_broken"] = (status == "BROKEN")
     return report
 
 
